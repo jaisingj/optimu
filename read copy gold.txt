@@ -1,0 +1,1124 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+import io
+import os
+import base64
+from datetime import datetime, date, timedelta
+from PIL import Image
+
+# GPT-4-based Chat
+import openai
+
+##############################################################################
+# SETUP OPENAI CLIENT
+# We'll store the user's API key in st.session_state and update openai.api_key
+##############################################################################
+st.set_page_config(layout="wide", page_title="Trade Analysis Dashboard")
+
+# 1) Initialize chat history in session state for conversation memory
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        {"role": "system", "content": "You are a financial assistant. Answer using the user's transaction data."}
+    ]
+
+##############################################################################
+# CSS and Layout
+##############################################################################
+st.markdown(
+    """
+    <style>
+        [data-testid="stSidebar"] {
+            background-color: #C2E0FF;
+        }
+        [data-testid="stSidebar"] .block-container {
+            font-size: 14px;
+        }
+        .block-container {
+            font-size: 16px;
+        }
+        .stDownloadButton > button {
+            background-color: #0A57C1 !important;
+            color: white !important;
+            border: none !important;
+            padding: 10px 20px !important;
+            border-radius: 8px !important;
+            font-size: 16px !important;
+            font-weight: bold !important;
+            box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.2);
+            transition: background-color 0.3s ease;
+            margin-top: 10px !important;
+        }
+        .stDownloadButton > button:hover {
+            background-color: #388E3C !important;
+        }
+        .stButton > button {
+            background-color: #0A57C1 !important;
+            color: white !important;
+            border: none !important;
+            padding: 10px 20px !important;
+            border-radius: 8px !important;
+            font-size: 16px !important;
+            font-weight: bold !important;
+            box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.2);
+            transition: background-color 0.3s ease;
+            margin-top: 10px !important;
+        }
+        .stButton > button:hover {
+            background-color: #388E3C !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+##############################################################################
+# OPENAI API KEY INPUT IN THE SIDEBAR
+##############################################################################
+st.sidebar.subheader("OpenAI GPT-4 API Key")
+user_api_key = st.sidebar.text_input("Enter your OpenAI API key:", type="password")
+
+if user_api_key:
+    st.session_state["gpt4_api_key"] = user_api_key
+    st.sidebar.success("Key saved. You can now use Ask OptimuS!", icon="✅")
+    openai.api_key = user_api_key
+else:
+    # If no key is provided and none is in session_state, show a warning
+    if "gpt4_api_key" not in st.session_state or not st.session_state["gpt4_api_key"]:
+        st.sidebar.warning("Please enter a valid API key to use Ask OptimuS.")
+
+##############################################################################
+# NAVIGATION: FAQ or Ask OptimuS
+##############################################################################
+st.sidebar.markdown("---")
+option_choice = st.sidebar.radio("FAQ or Ask OptimuS", ["Ask OptimuS"])
+
+##############################################################################
+# PAGE SELECTION: Dashboard or FAQ
+##############################################################################
+page_selection = st.sidebar.radio(
+    "Select Page",
+    ("Dashboard", "FAQ")
+)
+
+# If the user selects FAQ, show the FAQ page and stop.
+if page_selection == "FAQ":
+    st.title("FAQ - Application Usage")
+    st.markdown(
+        """
+        <div style="font-size: 20px;">
+            <strong>1. What does this app do?</strong><br>
+            This app allows you to upload a CSV or Excel file containing trade data from brokers 
+            (e.g., Schwab or Robinhood). It processes the data, calculates metrics such as Premium, 
+            Return, and Collateral, and then displays various summaries, charts, and a detailed 
+            transaction table.
+            <br><br>
+            <strong>2. What are the selections and options?</strong><br>
+            - <em>Broker Selection:</em> Choose your broker (Robinhood or Schwab).<br>
+            - <em>Page Selection:</em> Choose between the main Dashboard and the FAQ page.<br>
+            - <em>Sort Detailed Transactions:</em> In the sidebar, there are drop-downs that allow you to sort 
+              the detailed transaction table by columns such as Activity Date, Instrument, Status, 
+              Collateral, Premium($), or Return. You can also select the sort order (ascending or descending).
+            <br><br>
+            <strong>3. What is the Summary Table?</strong><br>
+            The summary table aggregates your trade data by Activity Month. It displays the total Net Premium 
+            and the Net Premium after a user-selected tax rate is applied, along with a “Grand Total” row.
+            <br><br>
+            <strong>4. What are the Charts?</strong><br>
+            - <em>Bar Chart (Monthly Net Premium):</em> This chart shows the Net Premium and Net After Tax for 
+              each month.<br>
+            - <em>Pie Charts:</em> Separate pie charts display open positions, closed/expired premium distributions, 
+              and a breakdown of calls versus puts.
+            <br><br>
+            <strong>5. What is the Detailed Transaction Table?</strong><br>
+            This table lists each processed transaction, including details such as Activity Date, Instrument, 
+            Option Type, Quantity, Strike Price, Expiry Date, transaction amounts (STO($) and BTC($)), 
+            Premium($), Collateral, and Return.
+            <br><br>
+            <strong>6. How is the Return calculated?</strong><br>
+            - For <strong>Put</strong> transactions:  
+              Return = (Premium($) / Collateral) × 100  
+              (Collateral here is computed as: Strike Price × Quantity × 100)<br>
+            - For <strong>Call</strong> (covered call) transactions:  
+              Return = (Premium($) / (Last Price × Quantity × 100)) × 100  
+            <br><br>
+            <strong>7. How is Net Premium calculated?</strong><br>
+            Net Premium for each transaction is calculated by the difference between the sell transaction (STO) 
+            and the buy transaction (BTC) amounts. The summary table then aggregates these premiums by month.
+            <br><br>
+            <strong>8. Sorting the Detailed Transaction Table:</strong><br>
+            You can sort the detailed transactions by selecting any of the following columns: 
+            Activity Date, Instrument, Status, Collateral, Premium($), or Return in ascending or descending order.
+            <br><br>
+            <strong>General Note:</strong><br>
+            Upload your trade file, select your broker, choose the desired sort options from the sidebar, 
+            and then view the processed data through the summary table, charts, and detailed transactions table.
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+    st.stop()
+
+##############################################################################
+# GPT-4 Chat with Conversation Memory
+##############################################################################
+def query_gpt4_conversational(prompt: str) -> str:
+    """
+    Calls OpenAI GPT-4 with conversation memory from st.session_state.chat_history.
+    """
+    try:
+        # Append user query to the conversation
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+
+        # Call GPT-4
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=st.session_state.chat_history
+        )
+        # Extract the reply
+        reply = response["choices"][0]["message"]["content"]
+
+        # Add GPT-4 response to the conversation
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+
+        return reply
+    except Exception as e:
+        return f"Error communicating with GPT-4: {e}"
+
+def run_gpt4_chat():
+    """
+    Allows the user to ask GPT-4 questions about the filtered transactions,
+    with conversation memory stored in st.session_state.chat_history.
+    """
+    user_key = st.session_state.get("gpt4_api_key", "")
+    transactions_df = st.session_state.get("filtered_transactions_df", None)
+    
+    if not user_key:
+        st.markdown("<h2 style='font-size:28px; text-align:center;'>Please enter your API key in the sidebar to use OptimuS bot.</h2>", unsafe_allow_html=True)
+        return
+    if transactions_df is None or transactions_df.empty:
+        st.warning("No filtered transactions available.")
+        return
+
+    st.subheader("Ask OptimuS (GPT-4) – Press Enter to submit")
+
+    send_data = st.checkbox("Send transaction data to GPT? (Needed for GPT to analyze your trades.)")
+
+    def process_gpt_query():
+        user_query = st.session_state.get("user_input", "").strip()
+        if not user_query:
+            return
+        if not send_data:
+            # If user does NOT want to share data
+            prompt = (
+                "You are a trading assistant. The user chose NOT to share transaction data.\n\n"
+                f"User's Question: {user_query}"
+            )
+        else:
+            # Drop some columns to reduce token usage (optional)
+            drop_cols = ["BTC Price", "STO Price", "Collateral"]
+            truncated_df = transactions_df.drop(columns=drop_cols, errors='ignore')
+
+            # For example, if too large, keep last 100 rows
+            if len(truncated_df) > 100:
+                truncated_df = truncated_df.tail(100)
+
+            csv_string = truncated_df.to_csv(index=False)
+            prompt = (
+                "You are a trading assistant. Answer questions based on the provided transaction data.\n\n"
+                "Transaction Data (CSV Format):\n"
+                f"{csv_string}\n\n"
+                f"User's Question: {user_query}"
+            )
+
+        response = query_gpt4_conversational(prompt)
+        st.session_state["gpt_response"] = response
+
+    st.text_input(
+        label="Type your GPT-4 question here and press Enter:",
+        key="user_input",
+        on_change=process_gpt_query
+    )
+
+    if "gpt_response" in st.session_state:
+        st.write("**GPT-4 Response:**")
+        st.write(st.session_state["gpt_response"])
+
+##############################################################################
+# PARSING & PREPROCESSING FUNCTIONS (NO CHANGES HERE)
+##############################################################################
+def parse_amount(amount):
+    if pd.isna(amount):
+        return 0.0
+    text = str(amount).replace('$', '').replace(',', '').replace('(', '-').replace(')', '')
+    matches = re.findall(r'[+-]?\d+(?:\.\d+)?', text)
+    if not matches:
+        return 0.0
+    return sum(float(m) for m in matches)
+
+def fallback_extract_expiry_date(description):
+    if pd.isna(description):
+        return None
+    match = re.search(r'\b(\d{1,2}/\d{1,2}/\d{4})\b', str(description))
+    if match:
+        try:
+            return datetime.strptime(match.group(1), '%m/%d/%Y')
+        except ValueError:
+            return None
+    return None
+
+def symbol_extract_expiry_strike_option(symbol_text):
+    if not symbol_text or pd.isna(symbol_text):
+        return (None, 0.0, None)
+    dt_match = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", symbol_text)
+    if dt_match:
+        try:
+            expiry_dt = datetime.strptime(dt_match.group(1), "%m/%d/%Y").date()
+        except ValueError:
+            expiry_dt = None
+    else:
+        expiry_dt = None
+
+    sc_match = re.search(r"\s(\d+(?:\.\d+))\s([PC])\b", symbol_text)
+    if sc_match:
+        try:
+            strike_val = float(sc_match.group(1))
+        except ValueError:
+            strike_val = 0.0
+        put_or_call = sc_match.group(2).upper()
+        opt_type = "Put" if put_or_call == 'P' else "Call"
+    else:
+        strike_val = 0.0
+        opt_type = None
+
+    return (expiry_dt, strike_val, opt_type)
+
+def parse_schwab_to_robinhood(file_like):
+    df = pd.read_csv(file_like)
+    df = df[df['Action'].isin(['Sell to Open','Buy to Close'])].copy()
+    df['Instrument'] = df['Symbol'].str.split().str[0]
+    df['Trans Code'] = np.where(df['Action'] == 'Sell to Open', 'STO', 'BTC')
+
+    def clean_date(d):
+        if pd.isna(d):
+            return None
+        match = re.search(r"as of (\d{2}/\d{2}/\d{4})", str(d))
+        if match:
+            try:
+                return datetime.strptime(match.group(1), "%m/%d/%Y").date()
+            except ValueError:
+                return None
+        try:
+            return datetime.strptime(str(d), "%m/%d/%Y").date()
+        except ValueError:
+            return None
+
+    df['Activity Date'] = df['Date'].apply(clean_date)
+    df['Price']  = df['Price'].apply(parse_amount)
+    df['Amount'] = df['Amount'].apply(parse_amount)
+
+    parsed = df['Symbol'].apply(symbol_extract_expiry_strike_option)
+    df['Parsed Expiry'] = parsed.apply(lambda x: x[0])
+    df['Parsed Strike'] = parsed.apply(lambda x: x[1])
+    df['Parsed Type']   = parsed.apply(lambda x: x[2])
+
+    if df['Parsed Expiry'].notna().sum() == 0:
+        df['Parsed Expiry'] = df['Description'].apply(fallback_extract_expiry_date)
+        df['Parsed Strike'] = 0.0
+        df['Parsed Type']   = None
+
+    df['Expiry Date']  = df['Parsed Expiry']
+    df['Strike Price'] = df['Parsed Strike']
+    df['Option Type']  = df['Parsed Type']
+
+    def segregate_amt(a):
+        if pd.isna(a):
+            return (None, None)
+        if a > 0:
+            return (a, None)
+        elif a < 0:
+            return (None, a)
+        else:
+            return (None, None)
+
+    df[['STO($)', 'BTC($)']] = df['Amount'].apply(lambda x: pd.Series(segregate_amt(x)))
+    keep_cols = [
+        'Activity Date','Instrument','Description','Trans Code',
+        'Price','Amount','Expiry Date','Strike Price','Option Type',
+        'STO($)','BTC($)'
+    ]
+    return df[keep_cols].copy()
+
+def parse_description_for_option(desc_text):
+    if not desc_text or pd.isna(desc_text):
+        return (None, 0.0, None)
+    dt_match = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", str(desc_text))
+    if dt_match:
+        try:
+            expiry_dt = datetime.strptime(dt_match.group(1), "%m/%d/%Y").date()
+        except ValueError:
+            expiry_dt = None
+    else:
+        expiry_dt = None
+
+    type_match = re.search(r"\b(put|call)\b", str(desc_text), re.IGNORECASE)
+    if type_match:
+        opt_type = type_match.group(1).capitalize()
+    else:
+        opt_type = None
+
+    strike_match = re.search(r"\$(\d+(?:\.\d+)?)", str(desc_text))
+    if strike_match:
+        strike_val = float(strike_match.group(1))
+    else:
+        strike_val = 0.0
+
+    return (expiry_dt, strike_val, opt_type)
+
+def parse_robinhood_file(file_like):
+    file_name = file_like.name.lower()
+    if file_name.endswith('.csv'):
+        data = pd.read_csv(file_like, on_bad_lines="skip")
+    else:
+        data = pd.read_excel(file_like)
+
+    data.columns = data.columns.str.strip()
+
+    if "Description" in data.columns:
+        extracted = data["Description"].apply(parse_description_for_option)
+        data["Expiry Date"] = extracted.apply(lambda x: x[0])
+        data["Strike Price"] = extracted.apply(lambda x: x[1])
+        data["Option Type"] = extracted.apply(lambda x: x[2])
+    else:
+        st.warning("Robinhood CSV has no 'Description' column. No date/option type parsed.")
+
+    if "Trans Code" in data.columns and "Amount" in data.columns:
+        data["STO($)"] = np.where(data["Trans Code"] == "STO", data["Amount"], 0)
+        data["BTC($)"] = np.where(data["Trans Code"] == "BTC", data["Amount"], 0)
+
+    for col_candidate in ['Amount','Price','Quantity']:
+        if col_candidate in data.columns:
+            data[col_candidate] = data[col_candidate].apply(parse_amount)
+
+    return data
+
+def tag_transactions(merged_data):
+    def assign_status(row):
+        current_date = date.today()
+        expiry_val = row.get('Expiry Date')
+        expiry_date = None
+        if pd.notna(expiry_val):
+            if isinstance(expiry_val, (pd.Timestamp, datetime)):
+                expiry_date = expiry_val.date()
+            elif isinstance(expiry_val, date):
+                expiry_date = expiry_val
+            elif isinstance(expiry_val, str):
+                try:
+                    tmp_dt = datetime.strptime(expiry_val, "%m/%d/%Y")
+                    expiry_date = tmp_dt.date()
+                except ValueError:
+                    expiry_date = None
+
+        # If using "BTC($)" to decide status, keep as is:
+        if (pd.notna(row.get('STO Date')) and pd.isna(row.get('BTC Date')) and expiry_date and (expiry_date > current_date)):
+            return "Open"
+        if (pd.isna(row.get('BTC Date')) and expiry_date and (expiry_date < current_date)):
+            return "Expired"
+        # Closed if the absolute value of BTC Price <= 2
+        if (pd.notna(row.get('BTC Date')) and abs(row.get('BTC Price', 0)) <=2):
+            return "Closed"
+        # Rolled if BTC($) is > 2
+        if (pd.notna(row.get('BTC Date')) and pd.notna(row.get('STO Date')) and abs(row.get('BTC Price', 0)) > 2):
+            return "Rolled"
+        return "Open"
+
+    merged_data['Status'] = merged_data.apply(assign_status, axis=1)
+    return merged_data
+
+def compute_quantity(row):
+    sto_amt = row.get('STO($)', 0)
+    sto_price = row.get('STO Price', 0)
+    btc_amt = row.get('BTC($)', 0)
+    btc_price = row.get('BTC Price', 0)
+    if sto_amt != 0:
+        amt = sto_amt
+        price = sto_price
+    elif btc_amt != 0:
+        amt = btc_amt
+        price = btc_price
+    else:
+        return 0
+    if pd.isna(price) or price == 0:
+        return 0
+    return amt / (price * 100)
+
+def calculate_premium(row):
+    sto_val = row.get('STO($)', 0)
+    btc_val = abs(row.get('BTC($)', 0))
+    return sto_val - btc_val
+
+def generate_unique_activity_months(df):
+    if 'Activity Month' not in df.columns:
+        return []
+    vals = df['Activity Month'].dropna().unique().tolist()
+    return sorted(vals, reverse=True)
+
+def generate_unique_expiry_months(df):
+    if 'Expiry Month' not in df.columns:
+        return []
+    vals = df['Expiry Month'].dropna().unique().tolist()
+    return sorted(vals, reverse=True)
+
+def format_date_any(value):
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+##############################################################################
+# HEADER IMAGE (OPTIONAL)
+##############################################################################
+col1, col2, col3, col4 = st.columns([0.3, 0.2, 0.5, 0.6])
+
+try:
+    with col3:
+        image_file = "coined.jpeg"
+        from PIL import Image
+        image1 = Image.open(image_file)
+        def image_to_base64(img):
+            buffered = io.BytesIO()
+            img.save(buffered, format="PNG")
+            return base64.b64encode(buffered.getvalue()).decode()
+
+        st.markdown(
+            f"""
+            <div style="text-align: center; margin-top: -80px;">
+                <img src='data:image/png;base64,{image_to_base64(image1)}'
+                     style='max-width:70%; display:block; margin:auto;'>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+except FileNotFoundError:
+    st.warning("Header image 'coined.jpeg' not found. Please ensure the file is present in the working directory.")
+
+##############################################################################
+# MULTIPLE FILE UPLOADER
+##############################################################################
+uploaded_files = st.sidebar.file_uploader(
+    "Upload your trades (CSV/Excel). If the filename starts with 'Designated', it is Schwab; otherwise Robinhood.",
+    type=["csv", "xlsx"],
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    data_frames = []
+    for up_file in uploaded_files:
+        # Distinguish Schwab vs. Robinhood
+        if up_file.name.startswith("Designated"):
+            try:
+                parsed_df = parse_schwab_to_robinhood(up_file)
+                parsed_df["Broker"] = "Schwab"
+            except Exception as e:
+                st.error(f"Error parsing Schwab file '{up_file.name}': {e}")
+                continue
+        else:
+            try:
+                parsed_df = parse_robinhood_file(up_file)
+                parsed_df["Broker"] = "Hood"
+            except Exception as e:
+                st.error(f"Error parsing Robinhood file '{up_file.name}': {e}")
+                continue
+
+        if not parsed_df.empty:
+            data_frames.append(parsed_df)
+
+    if not data_frames:
+        st.error("No valid data from the uploaded files.")
+        st.stop()
+
+    data = pd.concat(data_frames, ignore_index=True)
+
+    current_date_str = datetime.now().strftime("%b%d").lower()
+    combined_filename = f"combined_{current_date_str}.csv"
+    combined_path = os.path.join('/tmp', combined_filename)
+    data.to_csv(combined_path, index=False)
+
+    if 'BTC Date' in data.columns:
+        data['BTC Date'] = data['BTC Date'].replace('', pd.NA)
+        data['BTC Date'] = pd.to_datetime(data['BTC Date'], format='%m/%d/%Y', errors='coerce')
+
+    for col_candidate in ['Amount', 'Price', 'Quantity']:
+        if col_candidate in data.columns:
+            data[col_candidate] = data[col_candidate].apply(parse_amount)
+
+    if 'Expiry Date' not in data.columns:
+        data['Expiry Date'] = data['Description'].apply(fallback_extract_expiry_date)
+    if 'Strike Price' not in data.columns:
+        data['Strike Price'] = data['Description'].apply(
+            lambda x: float(re.search(r"\$(\d+(\.\d+)?)", str(x)).group(1))
+            if re.search(r"\$(\d+(\.\d+)?)", str(x)) else 0.0
+        )
+    if 'Option Type' not in data.columns:
+        data['Option Type'] = data['Description'].apply(
+            lambda x: "Call" if "call" in str(x).lower() else ("Put" if "put" in str(x).lower() else "Other")
+        )
+
+    group_cols = ["Instrument", "Trans Code", "Activity Date", "Description", "Broker"]
+    agg_dict = {
+        "Amount": "sum",
+        "Price": "mean",
+        "Option Type": "first",
+        "Strike Price": "first",
+        "Expiry Date": "first"
+    }
+    data_consolidated = data.groupby(group_cols, as_index=False, dropna=False).agg(agg_dict)
+    data_consolidated = data_consolidated.dropna(subset=['Activity Date','Instrument','Trans Code'])
+    sto_data = data_consolidated[data_consolidated['Trans Code'] == 'STO']
+    btc_data = data_consolidated[data_consolidated['Trans Code'] == 'BTC']
+
+    sto_agg = {
+        "Amount": "sum",
+        "Price": "mean",
+        "Activity Date": "min",
+        "Option Type": "first",
+        "Strike Price": "first",
+        "Expiry Date": "first"
+    }
+    sto_grouped = (
+        sto_data
+        .groupby(["Description", "Instrument", "Broker"], dropna=False)
+        .agg(sto_agg)
+        .reset_index()
+        .rename(columns={
+            "Amount": "STO($)",
+            "Price": "STO Price",
+            "Activity Date": "STO Date"
+        })
+    )
+    btc_agg = {
+        "Amount": "sum",
+        "Price": "mean",
+        "Activity Date": "max"
+    }
+    btc_grouped = (
+        btc_data
+        .groupby(["Description", "Instrument", "Broker"], dropna=False)
+        .agg(btc_agg)
+        .reset_index()
+        .rename(columns={
+            "Amount": "BTC($)",
+            "Price": "BTC Price",
+            "Activity Date": "BTC Date"
+        })
+    )
+    merged_data = pd.merge(
+        sto_grouped, btc_grouped,
+        on=["Description", "Instrument", "Broker"],
+        how="outer"
+    )
+    merged_data['STO($)'] = merged_data['STO($)'].fillna(0)
+    merged_data['BTC($)'] = merged_data['BTC($)'].fillna(0)
+    merged_data['STO Price'] = merged_data['STO Price'].fillna(0)
+    merged_data['BTC Price'] = merged_data['BTC Price'].fillna(0)
+    merged_data['Activity Date'] = merged_data[['STO Date', 'BTC Date']].apply(
+        lambda row: min([d for d in row if pd.notna(d)]) if any(pd.notna(d) for d in row) else pd.NaT,
+        axis=1
+    )
+    merged_data['Activity Date'] = pd.to_datetime(merged_data['Activity Date'], errors='coerce')
+    merged_data['Amount'] = merged_data['STO($)'] + merged_data['BTC($)']
+    merged_data['Activity Month'] = merged_data['Activity Date'].dt.strftime('%Y-%m')
+    merged_data['Expiry Month'] = pd.to_datetime(merged_data['Expiry Date'], errors='coerce').dt.strftime('%Y-%m')
+    merged_data['Quantity'] = merged_data.apply(compute_quantity, axis=1).round(0).astype(int)
+    merged_data['Premium($)'] = merged_data.apply(calculate_premium, axis=1)
+    merged_data = tag_transactions(merged_data)
+    data = merged_data.copy()
+
+    # -----------------------------------------------------------------
+    # TAX BRACKET & SUMMARY
+    # -----------------------------------------------------------------
+    tax_colA, tax_colB, tax_colC = st.columns([0.5, 1, 2])
+    with tax_colB:
+        total_premium = data["Premium($)"].sum()
+        current_year = datetime.now().year
+        previous_year = current_year - 1
+        current_year_premium = data[data["Activity Month"].str.startswith(str(current_year))]["Premium($)"].sum()
+        prev_year_premium = data[data["Activity Month"].str.startswith(str(previous_year))]["Premium($)"].sum()
+
+        premium_summary_html = f"""<style>
+@keyframes flash {{
+    0% {{ color: green; }}
+    50% {{ color: blue; }}
+    100% {{ color: green; }}
+}}
+</style>
+<p style="font-family: Arial; font-size: 20px; white-space: nowrap;">
+    <strong>Total Premium Earned:</strong>
+    <span style="font-weight: bold; animation: flash 1s infinite alternate;">
+        ${total_premium:,.2f}
+    </span>
+    &nbsp;&nbsp;|&nbsp;&nbsp;
+    <strong>Total Premium from {previous_year}:</strong>
+    <span style="font-weight: bold; animation: flash 1s infinite alternate;">
+        ${prev_year_premium:,.2f}
+    </span>
+    &nbsp;&nbsp;|&nbsp;&nbsp;
+    <strong>Total Premium YTD ({current_year}):</strong>
+    <span style="font-weight: bold; animation: flash 1s infinite alternate;">
+        ${current_year_premium:,.2f}
+    </span>
+</p>"""
+        st.markdown(premium_summary_html, unsafe_allow_html=True)
+
+    tax_colA, tax_colB, tax_colC = st.columns([0.5, 1, 1])
+    with tax_colB:
+        st.markdown("<h2 style='font-size:28px; text-align:center;'>Tax Bracket</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size:20px; margin-bottom:5px; text-align:center;'>Select Tax Rate to Deduct from Net Premium</p>", unsafe_allow_html=True)
+        tax_rate = st.select_slider(
+            label="",
+            options=[0, 0.10, 0.12, 0.22, 0.24, 0.32, 0.35, 0.37],
+            format_func=lambda x: f"{int(x * 100)}%"
+        )
+
+    # -----------------------------------------------------------------
+    # MONTHLY SUMMARY
+    # -----------------------------------------------------------------
+    if 'Premium($)' in data.columns:
+        monthly_summary = (
+            data.groupby('Activity Month')['Premium($)']
+            .sum()
+            .reset_index()
+            .rename(columns={'Premium($)': 'Net Premium'})
+            .sort_values(by='Activity Month')
+        )
+    else:
+        monthly_summary = pd.DataFrame()
+
+    if not monthly_summary.empty:
+        monthly_summary['Net After Tax'] = monthly_summary['Net Premium'] * (1 - tax_rate)
+        gtnp = monthly_summary['Net Premium'].sum()
+        gtat = monthly_summary['Net After Tax'].sum()
+        gtr = pd.DataFrame({
+            'Activity Month': ['Grand Total'],
+            'Net Premium': [gtnp],
+            'Net After Tax': [gtat]
+        })
+        monthly_summary = pd.concat([monthly_summary, gtr], ignore_index=True)
+
+    summary_col1, summary_col2, summary_col3 = st.columns([0.3, 0.1, 0.7])
+    with summary_col1:
+        st.markdown("<p style='font-size:28px; margin-bottom:5px; text-align:center; font-weight: bold;'>Monthly Summary</p>", unsafe_allow_html=True)
+        if not monthly_summary.empty:
+            styled_summ = (
+                monthly_summary.style
+                .format({"Net Premium": "${:,.2f}", "Net After Tax": "${:,.2f}"})
+                .set_properties(**{'font-size': '18px', 'text-align': 'center'})
+                .set_table_styles([
+                    {
+                        'selector': 'thead th',
+                        'props': [
+                            ('background-color', 'aliceblue'),
+                            ('color', 'black'),
+                            ('font-weight', 'bold'),
+                            ('text-align', 'center'),
+                            ('border', '1px solid #CCCCCC'),
+                            ('padding', '10px')
+                        ]
+                    },
+                    {
+                        'selector': 'tbody td',
+                        'props': [
+                            ('padding', '10px'),
+                            ('border', '1px solid #CCCCCC')
+                        ]
+                    },
+                    {
+                        'selector': 'table',
+                        'props': [
+                            ('width', '100%'),
+                            ('margin', '0 auto'),
+                            ('border-collapse', 'collapse')
+                        ]
+                    }
+                ])
+                .apply(
+                    lambda row: ['background-color: aliceblue; color: black; font-weight: bold; text-align:center']*len(row)
+                    if row['Activity Month'] == 'Grand Total' else ['']*len(row),
+                    axis=1
+                )
+            )
+            st.write(styled_summ.to_html(), unsafe_allow_html=True)
+
+            csv_summ = monthly_summary.to_csv(index=False)
+            st.download_button(
+                label="Download Monthly Summary CSV",
+                data=csv_summ,
+                file_name="monthly_summary.csv",
+                mime="text/csv"
+            )
+        else:
+            st.write("No monthly summary to display.")
+
+    def plot_monthly_premium(mdf):
+        import plotly.express as px
+        cdata = mdf[mdf['Activity Month'] != 'Grand Total']
+        if 'Net After Tax' not in cdata.columns:
+            st.write("'Net After Tax' not found => skipping bar chart.")
+            return
+        try:
+            fig = px.bar(
+                cdata,
+                x='Activity Month',
+                y=['Net Premium','Net After Tax'],
+                labels={'value':'Net($)', 'Activity Month':'Month'},
+                barmode='group',
+                text_auto='.2s',
+                height=700,
+                width=900
+            )
+        except ValueError as ve:
+            st.error(f"Plotly Error: {ve}")
+            return
+
+        fig.update_layout(
+            font=dict(size=12),
+            legend=dict(font=dict(size=12)),
+            xaxis_tickangle=-45
+        )
+        mn = min(cdata['Net Premium'].min(), cdata['Net After Tax'].min())
+        mx = max(cdata['Net Premium'].max(), cdata['Net After Tax'].max())
+        fig.update_yaxes(range=[mn * 1.2 if mn < 0 else 0, mx * 1.2 if mx > 0 else 0])
+        st.plotly_chart(fig, use_container_width=True)
+
+    with summary_col3:
+        st.markdown("<p style='font-size:28px; margin-bottom:5px; text-align:center; font-weight: bold;'>Monthly Net Premium</p>", unsafe_allow_html=True)
+        if not monthly_summary.empty:
+            plot_monthly_premium(monthly_summary)
+
+    # -----------------------------------------------------------------
+    # FILTERS & PIE CHARTS
+    # -----------------------------------------------------------------
+    unique_activity_months = generate_unique_activity_months(data)
+    unique_expiry_months = generate_unique_expiry_months(data)
+    instruments = sorted(data['Instrument'].unique().tolist())
+
+    selA, selB, selC = st.columns(3)
+    with selA:
+        chosen_activity = st.selectbox("Select Activity Month", ["All"] + unique_activity_months)
+    with selB:
+        chosen_expiry = st.selectbox("Select Expiry Month", ["All"] + unique_expiry_months)
+    with selC:
+        chosen_inst = st.selectbox("Select Instrument", ["All"] + instruments)
+
+    filtered_data_combined = data.copy()
+    if chosen_activity != "All":
+        filtered_data_combined = filtered_data_combined[filtered_data_combined['Activity Month'] == chosen_activity]
+    if chosen_expiry != "All":
+        filtered_data_combined = filtered_data_combined[filtered_data_combined['Expiry Month'] == chosen_expiry]
+    if chosen_inst != "All":
+        filtered_data_combined = filtered_data_combined[filtered_data_combined['Instrument'] == chosen_inst]
+
+    pc1, pc2, pc3 = st.columns(3)
+    color_seq = ['#008CEE','#000080','#A80000','#107C10','#094782','#6495ED','#5F9EA0','#2E8B57']
+
+    with pc1:
+        open_df = filtered_data_combined[filtered_data_combined['Status'] == 'Open']
+        if not open_df.empty:
+            tot_open = open_df['Quantity'].sum()
+            if tot_open > 0:
+                grp = open_df.groupby('Instrument')['Quantity'].sum().reset_index()
+                import plotly.express as px
+                seq = color_seq[:len(grp)]
+                sub_t = []
+                if chosen_activity != "All":
+                    sub_t.append(f"Activity: {chosen_activity}")
+                if chosen_expiry != "All":
+                    sub_t.append(f"Expiry: {chosen_expiry}")
+                sub_t = " & ".join(sub_t) if sub_t else "All"
+                fig1 = px.pie(
+                    grp,
+                    names='Instrument',
+                    values='Quantity',
+                    title=f"Open Positions<br>({sub_t})",
+                    hole=0.3,
+                    color='Instrument',
+                    color_discrete_sequence=seq
+                )
+                fig1.update_traces(textinfo='percent+label', textfont=dict(size=14))
+                fig1.update_layout(
+                    title=dict(font=dict(size=18)),
+                    legend_title_text='Instrument',
+                    legend=dict(font=dict(size=12),
+                                orientation='h', x=0.5, xanchor='center', y=-0.1),
+                    margin=dict(l=10, r=10, t=60, b=40)
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+            else:
+                st.write("No open positions for selected filters.")
+        else:
+            st.write("No open positions for selected filters.")
+
+    with pc2:
+        cx_df = filtered_data_combined[filtered_data_combined['Status'].isin(['Closed','Expired'])]
+        if not cx_df.empty:
+            col_prem = 'Premium($)' if 'Premium($)' in cx_df.columns else 'Amount'
+            agg_p = cx_df.groupby('Instrument')[col_prem].sum().reset_index()
+            if not agg_p.empty:
+                import plotly.express as px
+                seq = color_seq[:len(agg_p)]
+                sub_t = []
+                if chosen_activity != "All":
+                    sub_t.append(f"Activity: {chosen_activity}")
+                if chosen_expiry != "All":
+                    sub_t.append(f"Expiry: {chosen_expiry}")
+                sub_t = " & ".join(sub_t) if sub_t else "All"
+                fig2 = px.pie(
+                    agg_p,
+                    names='Instrument',
+                    values=col_prem,
+                    title=f"Closed/Expired Premium<br>({sub_t})",
+                    hole=0.3,
+                    color='Instrument',
+                    color_discrete_sequence=seq
+                )
+                fig2.update_traces(textinfo='percent+label', textfont=dict(size=14))
+                fig2.update_layout(
+                    title=dict(font=dict(size=18)),
+                    legend_title_text='Instrument',
+                    legend=dict(font=dict(size=12),
+                                orientation='h', x=0.5, xanchor='center', y=-0.1),
+                    margin=dict(l=10, r=10, t=60, b=40)
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+            else:
+                st.write("No closed/expired premium for selected filters.")
+        else:
+            st.write("No closed/expired transactions for selected filters.")
+
+    with pc3:
+        cp_dist = filtered_data_combined['Option Type'].value_counts().reset_index()
+        cp_dist.columns = ['Option Type','Count']
+        total_opt = cp_dist['Count'].sum()
+        if total_opt > 0:
+            import plotly.express as px
+            seq = color_seq[:len(cp_dist)]
+            sub_t = []
+            if chosen_activity != "All":
+                sub_t.append(f"Activity: {chosen_activity}")
+            if chosen_expiry != "All":
+                sub_t.append(f"Expiry: {chosen_expiry}")
+            sub_t = " & ".join(sub_t) if sub_t else "All"
+            fig3 = px.pie(
+                cp_dist,
+                names='Option Type',
+                values='Count',
+                title=f"Calls vs Puts Distribution<br>({sub_t})",
+                hole=0.3,
+                color='Option Type',
+                color_discrete_sequence=seq
+            )
+            fig3.update_traces(textinfo='percent+label', textfont=dict(size=14))
+            fig3.update_layout(
+                title=dict(font=dict(size=18)),
+                legend_title_text='Option Type',
+                legend=dict(font=dict(size=12),
+                            orientation='h', x=0.5, xanchor='center', y=-0.1),
+                margin=dict(l=10, r=10, t=60, b=40)
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.write("No option types available for the selected filters.")
+
+    # -----------------------------------------------------------------
+    # DETAILED TRANSACTIONS
+    # -----------------------------------------------------------------
+    if 'Activity Date' in data.columns:
+        filtered_data_combined = filtered_data_combined.copy()
+        filtered_data_combined['Collateral'] = (
+            filtered_data_combined['Strike Price'] *
+            filtered_data_combined['Quantity'] * 100
+        )
+        filtered_data_combined.loc[
+            filtered_data_combined['Option Type'].str.lower() == "call",
+            "Collateral"
+        ] = np.nan
+
+        desired_cols = [
+            'Activity Date','Instrument','Option Type','Quantity',
+            'Strike Price','Expiry Date','STO($)','BTC($)','STO Price','BTC Price',
+            'STO Date','BTC Date','Status','Premium($)','Collateral','Broker'
+        ]
+        existing_cols = [c for c in desired_cols if c in filtered_data_combined.columns]
+        filtered_transactions = filtered_data_combined[existing_cols].copy()
+
+        for dc in ['Activity Date','STO Date','BTC Date','Expiry Date']:
+            if dc in filtered_transactions.columns:
+                filtered_transactions[dc] = pd.to_datetime(filtered_transactions[dc], errors='coerce')
+
+        filtered_transactions = filtered_transactions.sort_values(by='Activity Date', ascending=False)
+
+        totals = filtered_transactions[['STO($)','BTC($)','Premium($)','Collateral']]\
+                 .apply(lambda x: pd.to_numeric(x, errors='coerce')).sum()
+        total_row = {}
+        for coln in filtered_transactions.columns:
+            if coln in ['STO($)','BTC($)','Premium($)','Collateral']:
+                total_row[coln] = totals[coln]
+            elif coln == 'Instrument':
+                total_row[coln] = "TOTAL"
+            else:
+                total_row[coln] = ""
+
+        total_df = pd.DataFrame([total_row])
+        filtered_transactions_total = pd.concat([filtered_transactions, total_df], ignore_index=True)
+
+        def highlight_totals(row):
+            if str(row.get('Instrument', '')).strip().upper() == "TOTAL":
+                return ['font-weight: bold'] * len(row)
+            else:
+                return [''] * len(row)
+
+        if filtered_transactions_total.empty:
+            st.write("No transactions found for the selected filters.")
+        else:
+            numeric_cols = [
+                'STO($)','BTC($)','Premium($)','STO Price','BTC Price',
+                'Strike Price','Collateral','Last Price'
+            ]
+            for coln in numeric_cols:
+                if coln in filtered_transactions_total.columns:
+                    filtered_transactions_total[coln] = pd.to_numeric(
+                        filtered_transactions_total[coln],
+                        errors='coerce'
+                    ).fillna(0.0)
+
+            def safe_format_date(val):
+                if pd.isna(val):
+                    return ""
+                if isinstance(val, (pd.Timestamp, datetime, date)):
+                    return val.strftime("%Y-%m-%d")
+                return str(val)
+
+            styled_transactions = (
+                filtered_transactions_total.style
+                .format({
+                    "STO($)": "${:,.2f}",
+                    "BTC($)": "${:,.2f}",
+                    "Premium($)": "${:,.2f}",
+                    "STO Price": "${:,.2f}",
+                    "BTC Price": "${:,.2f}",
+                    "Strike Price": "${:,.2f}",
+                    "Collateral": "${:,.2f}",
+                    "Last Price": "${:,.2f}",
+                    "Activity Date": safe_format_date,
+                    "STO Date": safe_format_date,
+                    "BTC Date": safe_format_date,
+                    "Expiry Date": safe_format_date
+                })
+                .set_properties(**{'font-size': '15px', 'text-align': 'center'})
+                .set_table_styles([
+                    {
+                        'selector': 'thead th',
+                        'props': [
+                            ('background-color', 'aliceblue'),
+                            ('font-weight', 'bold'),
+                            ('border', '1px solid #CCCCCC'),
+                            ('padding', '10px')
+                        ]
+                    },
+                    {
+                        'selector': 'tbody td',
+                        'props': [
+                            ('padding', '10px'),
+                            ('border', '1px solid #CCCCCC')
+                        ]
+                    },
+                    {
+                        'selector': 'table',
+                        'props': [
+                            ('width', '100%'),
+                            ('margin', '0 auto'),
+                            ('border-collapse', 'collapse')
+                        ]
+                    }
+                ])
+                .apply(highlight_totals, axis=1)
+            )
+            # Store transactions DataFrame in session_state so GPT can access
+            st.session_state["filtered_transactions_df"] = filtered_transactions_total
+
+            # If "Ask OptimuS" => show in expander
+            if option_choice == "Ask OptimuS":
+                with st.expander("Detailed Transactions", expanded=False):
+                    st.write(styled_transactions.to_html(), unsafe_allow_html=True)
+                    det_csv = filtered_transactions_total.to_csv(index=False)
+                    st.session_state["transactions_csv"] = det_csv
+                    st.download_button(
+                        label="Download Detailed Transactions",
+                        data=det_csv.encode('utf-8'),
+                        file_name="detailed_transactions.csv",
+                        mime="text/csv"
+                    )
+            else:
+                st.write("### Detailed Transactions")
+                st.write(styled_transactions.to_html(), unsafe_allow_html=True)
+                det_csv = filtered_transactions_total.to_csv(index=False)
+                st.session_state["transactions_csv"] = det_csv
+                st.download_button(
+                    label="Download Detailed Transactions",
+                    data=det_csv.encode('utf-8'),
+                    file_name="detailed_transactions.csv",
+                    mime="text/csv"
+                )
+    else:
+        st.write("No 'Activity Date' found. Cannot show detailed transactions.")
+
+    # Finally, if user selected "Ask OptimuS", run GPT-4 chat
+    if option_choice == "Ask OptimuS":
+        run_gpt4_chat()
+
+else:
+    # If no files are uploaded
+    col_flash, _ = st.columns([0.3, 0.8])
+    with col_flash:
+        st.markdown(
+            """
+            <div style="
+                background: linear-gradient(45deg, #ffd6e7, #d6fffe, #d6efff, #ffd6e7);
+                background-size: 400% 400%;
+                animation: subtleColorfulGradient 15s ease infinite;
+                width: 100%;
+                padding: 20px;
+                text-align: center;
+                border-radius: 10px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+                margin-top: 20px;
+                ">
+                <p style="
+                    font-family: Arial, sans-serif;
+                    font-size: 16px;
+                    margin: 0;
+                    animation: flash 1s infinite alternate;
+                ">
+                    Please upload one or more CSV/XLSX files to get started.
+                </p>
+            </div>
+
+            <style>
+            /* Animate the gradient background */
+            @keyframes subtleColorfulGradient {
+                0%   { background-position: 0% 50%; }
+                50%  { background-position: 100% 50%; }
+                100% { background-position: 0% 50%; }
+            }
+            /* Flash the text from red to orange and back */
+            @keyframes flash {
+                0%   { color: red; }
+                50%  { color: orange; }
+                100% { color: red; }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
